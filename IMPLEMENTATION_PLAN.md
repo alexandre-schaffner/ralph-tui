@@ -1,6 +1,6 @@
 ---
-status: not-started
-phase: 1
+status: phase-1-complete
+phase: 2
 updated: 2026-01-20
 ---
 
@@ -17,28 +17,31 @@ Create a TUI that starts/stops `loop.sh` with <500ms response, streams stdout/st
 | Centralized State | Single source of truth (Redux-like) for UI consistency. | `AGENTS.md` |
 | Ring Buffer | Prevent UI lag/crashes from massive log volume. | `reviewer-feedback` |
 
-## High Priority: Core Infrastructure & Safety (Phase 1)
-- [ ] **1.1 Initialize Project Structure**
-  - Create `cmd/ralph-tui/main.go` (CLI entry)
-  - Create `src/lib/process/` (Manager package)
-  - Create `src/lib/state/` (State package)
-  - Create `src/tui/` (UI package)
-  - Run `go mod init`
-- [ ] **1.2 Implement Process Manager (`src/lib/process`)**
-  - Implement `Start(cmd string)`: Spawn `loop.sh` as subprocess
-  - Implement `Stop()`: Send SIGTERM, escalate to SIGKILL after timeout
-  - Implement `Stream()`: Return channels for stdout/stderr
-  - **Constraint**: Handle zombie processes via `Wait()` in goroutine
-- [ ] **1.3 Implement Ring Buffer for Streaming**
-  - Create fixed-size circular buffer (e.g., 1000 lines) in `src/lib/process`
-  - Ensure thread-safe writes from subprocess and reads from UI
-- [ ] **1.4 Implement Centralized State Store (`src/lib/state`)**
-  - Define `State` struct (Status, Logs slice, IterationCount)
-  - Implement thread-safe `Update` methods (Mutex or Channels)
-- [ ] **1.5 Basic Bubbletea Scaffold (`src/tui`)**
-  - Wire `main.go` to start Bubbletea program
-  - Implement root model in `src/tui/app.go`
-  - Connect State Store to Model Update loop
+## ✓ Completed: Core Infrastructure & Safety (Phase 1)
+- [x] **1.1 Initialize Project Structure**
+  - Created `cmd/ralph-tui/main.go` (CLI entry)
+  - Created `src/lib/process/` (Manager package)
+  - Created `src/lib/state/` (State package)
+  - Created `src/tui/` (UI package)
+  - Initialized Go module with Bubbletea/Lipgloss
+- [x] **1.2 Implement Process Manager (`src/lib/process`)**
+  - Implemented `Start()`: Spawns `loop.sh` as subprocess with arguments
+  - Implemented `Stop()`: Sends SIGTERM, escalates to SIGKILL after 5s timeout
+  - Implemented streaming via goroutines reading stdout/stderr
+  - Handles zombie processes via `Wait()` in background goroutine
+- [x] **1.3 Implement Ring Buffer for Streaming**
+  - Created fixed-size circular buffer (1000 lines) in `src/lib/process/ringbuffer.go`
+  - Thread-safe via RWMutex for concurrent writes/reads
+- [x] **1.4 Implement Centralized State Store (`src/lib/state`)**
+  - Defined `State` struct with all required fields
+  - Implemented thread-safe getters/setters using RWMutex
+- [x] **1.5 Basic Bubbletea Scaffold (`src/tui`)**
+  - Wired `main.go` to start Bubbletea program with flags
+  - Implemented root model in `src/tui/model.go`
+  - Connected State Store to Model Update loop
+  - Implemented all 4 views: Dashboard, Logs, Plan, Specs
+  - Added keyboard controls: s=start, x=stop, 1-4=tabs, q=quit
+  - Terminal size check (min 80x24)
 
 ## Medium Priority: UI Views & Features (Phase 2)
 - [ ] **2.1 Implement Logs View (`src/tui/views/logs`)**
