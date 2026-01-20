@@ -16,7 +16,14 @@ func main() {
 	mode := flag.String("mode", "build", "Loop mode: build, plan, plan-work")
 	maxIter := flag.Int("max", 0, "Max iterations (0 = unlimited)")
 	workDesc := flag.String("work", "", "Work description for plan-work mode")
+	scriptPath := flag.String("script", "./loop.sh", "Path to loop.sh script")
 	flag.Parse()
+
+	// Guard: Validate max iterations is non-negative
+	if *maxIter < 0 {
+		fmt.Fprintln(os.Stderr, "Error: --max must be non-negative")
+		os.Exit(1)
+	}
 
 	// Guard: Validate mode
 	var stateMode state.Mode
@@ -41,6 +48,7 @@ func main() {
 	appState := state.NewState()
 	appState.SetMode(stateMode)
 	appState.SetMaxIterations(*maxIter)
+	appState.SetScriptPath(*scriptPath)
 	if *workDesc != "" {
 		appState.SetWorkDesc(*workDesc)
 	}

@@ -14,25 +14,36 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// fileCache caches file content with timestamp for periodic refresh.
+type fileCache struct {
+	content   string
+	timestamp time.Time
+}
+
 // Model is the root Bubbletea model.
 type Model struct {
-	state   *state.State
-	manager *process.Manager
-	width   int
-	height  int
-	ready   bool
+	state         *state.State
+	manager       *process.Manager
+	width         int
+	height        int
+	ready         bool
+	planCache     *fileCache
+	specsCache    map[string]*fileCache
+	cacheDuration time.Duration
 }
 
 // NewModel creates a new TUI model.
-func NewModel(st *state.State, mgr *process.Manager) Model {
-	return Model{
-		state:   st,
-		manager: mgr,
+func NewModel(st *state.State, mgr *process.Manager) *Model {
+	return &Model{
+		state:         st,
+		manager:       mgr,
+		specsCache:    make(map[string]*fileCache),
+		cacheDuration: 5 * time.Second, // Refresh cache every 5 seconds
 	}
 }
 
 // Init initializes the model.
-func (m Model) Init() tea.Cmd {
+func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.fetchGitBranch(),
 		m.tickForLogs(),
@@ -40,7 +51,7 @@ func (m Model) Init() tea.Cmd {
 }
 
 // Update handles messages and updates the model.
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -52,7 +63,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKeyPress(msg)
 
 	case tickMsg:
-		return m, m.tickForLogs()
+		// Parse logs for iteration markers and batch with next tick
+		parseCmd := m.parseLogsForIterations()
+		tickCmd := m.tickForLogs()
+		if parseCmd != nil {
+			return m, tea.Batch(parseCmd, tickCmd)
+		}
+		return m, tickCmd
 
 	case gitBranchMsg:
 		m.state.SetGitBranch(string(msg))
@@ -71,7 +88,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // handleKeyPress processes keyboard input.
-func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, m.handleQuit()
@@ -92,10 +109,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "3":
 		m.state.SetCurrentView("plan")
+		// Invalidate cache on view switch for fresh content
+		m.planCache = nil
 		return m, nil
 
 	case "4":
 		m.state.SetCurrentView("specs")
+		// Invalidate cache on view switch for fresh content
+		m.specsCache = make(map[string]*fileCache)
 		return m, nil
 	}
 
@@ -103,7 +124,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleStart starts the loop process.
-func (m Model) handleStart() tea.Cmd {
+func (m *Model) handleStart() tea.Cmd {
 	if m.manager.IsRunning() {
 		return nil
 	}
@@ -135,7 +156,8 @@ func (m Model) handleStart() tea.Cmd {
 	m.state.SetComplete(false)
 	m.manager.ClearLogs()
 
-	err := m.manager.Start("./loop.sh", args...)
+	scriptPath := m.state.GetScriptPath()
+	err := m.manager.Start(scriptPath, args...)
 	if err != nil {
 		m.state.SetError(err.Error())
 	} else {
@@ -146,7 +168,7 @@ func (m Model) handleStart() tea.Cmd {
 }
 
 // handleStop stops the loop process.
-func (m Model) handleStop() tea.Cmd {
+func (m *Model) handleStop() tea.Cmd {
 	if !m.manager.IsRunning() {
 		return nil
 	}
@@ -161,7 +183,7 @@ func (m Model) handleStop() tea.Cmd {
 }
 
 // handleQuit handles application exit.
-func (m Model) handleQuit() tea.Cmd {
+func (m *Model) handleQuit() tea.Cmd {
 	if m.manager.IsRunning() {
 		_ = m.manager.Stop()
 	}
@@ -169,7 +191,7 @@ func (m Model) handleQuit() tea.Cmd {
 }
 
 // View renders the UI.
-func (m Model) View() string {
+func (m *Model) View() string {
 	if !m.ready {
 		return "Initializing..."
 	}
@@ -183,7 +205,7 @@ func (m Model) View() string {
 }
 
 // renderSizeWarning displays a warning for undersized terminals.
-func (m Model) renderSizeWarning() string {
+func (m *Model) renderSizeWarning() string {
 	warning := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("9")).
@@ -196,7 +218,7 @@ func (m Model) renderSizeWarning() string {
 }
 
 // renderMain renders the main UI layout.
-func (m Model) renderMain() string {
+func (m *Model) renderMain() string {
 	header := m.renderHeader()
 	tabs := m.renderTabs()
 	content := m.renderContent()
@@ -206,7 +228,7 @@ func (m Model) renderMain() string {
 }
 
 // renderHeader renders the application header.
-func (m Model) renderHeader() string {
+func (m *Model) renderHeader() string {
 	title := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("6")).
@@ -229,7 +251,7 @@ func (m Model) renderHeader() string {
 }
 
 // renderTabs renders the tab navigation.
-func (m Model) renderTabs() string {
+func (m *Model) renderTabs() string {
 	currentView := m.state.GetCurrentView()
 
 	tabs := []string{"1:Dashboard", "2:Logs", "3:Plan", "4:Specs"}
@@ -248,7 +270,7 @@ func (m Model) renderTabs() string {
 }
 
 // renderContent renders the current view content.
-func (m Model) renderContent() string {
+func (m *Model) renderContent() string {
 	contentHeight := m.height - 6 // Reserve space for header, tabs, footer
 
 	switch m.state.GetCurrentView() {
@@ -266,7 +288,7 @@ func (m Model) renderContent() string {
 }
 
 // renderDashboard renders the dashboard view.
-func (m Model) renderDashboard(height int) string {
+func (m *Model) renderDashboard(height int) string {
 	var lines []string
 
 	lines = append(lines, lipgloss.NewStyle().Bold(true).Render("Status Dashboard"))
@@ -320,7 +342,7 @@ func (m Model) renderDashboard(height int) string {
 }
 
 // renderLogs renders the logs view.
-func (m Model) renderLogs(height int) string {
+func (m *Model) renderLogs(height int) string {
 	logs := m.manager.GetLogs()
 
 	if len(logs) == 0 {
@@ -336,17 +358,34 @@ func (m Model) renderLogs(height int) string {
 	return strings.Join(logs[start:], "\n")
 }
 
-// renderPlan renders the plan view.
-func (m Model) renderPlan(height int) string {
+// renderPlan renders the plan view with caching.
+func (m *Model) renderPlan(height int) string {
+	// Check cache validity
+	now := time.Now()
+	if m.planCache != nil && now.Sub(m.planCache.timestamp) < m.cacheDuration {
+		// Use cached content
+		lines := strings.Split(m.planCache.content, "\n")
+		if len(lines) > height {
+			lines = lines[:height]
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	// Cache miss or expired - read from disk
 	data, err := os.ReadFile("IMPLEMENTATION_PLAN.md")
 	if err != nil {
 		return "No implementation plan found.\n\nRun './loop.sh plan' to create one."
 	}
 
 	content := string(data)
-	lines := strings.Split(content, "\n")
 
-	// Show first N lines that fit
+	// Update cache
+	m.planCache = &fileCache{
+		content:   content,
+		timestamp: now,
+	}
+
+	lines := strings.Split(content, "\n")
 	if len(lines) > height {
 		lines = lines[:height]
 	}
@@ -354,8 +393,8 @@ func (m Model) renderPlan(height int) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderSpecs renders the specs view.
-func (m Model) renderSpecs(height int) string {
+// renderSpecs renders the specs view with caching.
+func (m *Model) renderSpecs(height int) string {
 	entries, err := os.ReadDir("specs")
 	if err != nil {
 		return "No specs directory found."
@@ -380,17 +419,36 @@ func (m Model) renderSpecs(height int) string {
 		lines = append(lines, fmt.Sprintf("  - %s", file))
 	}
 
-	// Show first spec content if available
+	// Show first spec content if available with caching
 	if len(mdFiles) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("Preview: %s", mdFiles[0])))
 		lines = append(lines, "")
 
-		data, err := os.ReadFile(fmt.Sprintf("specs/%s", mdFiles[0]))
-		if err == nil {
-			preview := strings.Split(string(data), "\n")
+		firstFile := mdFiles[0]
+		now := time.Now()
+		var content string
+
+		// Check cache validity
+		if cache, exists := m.specsCache[firstFile]; exists && now.Sub(cache.timestamp) < m.cacheDuration {
+			content = cache.content
+		} else {
+			// Cache miss or expired - read from disk
+			data, err := os.ReadFile(fmt.Sprintf("specs/%s", firstFile))
+			if err == nil {
+				content = string(data)
+				// Update cache
+				m.specsCache[firstFile] = &fileCache{
+					content:   content,
+					timestamp: now,
+				}
+			}
+		}
+
+		if content != "" {
+			preview := strings.Split(content, "\n")
 			remaining := height - len(lines) - 1
-			if len(preview) > remaining {
+			if len(preview) > remaining && remaining > 0 {
 				preview = preview[:remaining]
 			}
 			lines = append(lines, preview...)
@@ -401,7 +459,7 @@ func (m Model) renderSpecs(height int) string {
 }
 
 // renderFooter renders the footer with keybindings.
-func (m Model) renderFooter() string {
+func (m *Model) renderFooter() string {
 	var keys []string
 
 	if m.manager.IsRunning() {
@@ -418,7 +476,7 @@ func (m Model) renderFooter() string {
 }
 
 // fetchGitBranch fetches the current git branch.
-func (m Model) fetchGitBranch() tea.Cmd {
+func (m *Model) fetchGitBranch() tea.Cmd {
 	return func() tea.Msg {
 		cmd := exec.Command("git", "branch", "--show-current")
 		output, err := cmd.Output()
@@ -430,14 +488,14 @@ func (m Model) fetchGitBranch() tea.Cmd {
 }
 
 // tickForLogs polls for new logs and parses iteration markers.
-func (m Model) tickForLogs() tea.Cmd {
+func (m *Model) tickForLogs() tea.Cmd {
 	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
 
 // parseLogsForIterations checks logs for iteration markers and completion.
-func (m Model) parseLogsForIterations() tea.Cmd {
+func (m *Model) parseLogsForIterations() tea.Cmd {
 	logs := m.manager.GetLogs()
 	if len(logs) == 0 {
 		return nil

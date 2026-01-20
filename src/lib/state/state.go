@@ -22,6 +22,7 @@ type State struct {
 	Mode          Mode
 	MaxIterations int
 	WorkDesc      string // For plan-work mode
+	ScriptPath    string // Path to loop.sh script
 
 	// Runtime state
 	CurrentIteration int
@@ -42,6 +43,7 @@ func NewState() *State {
 		ProcessStatus: process.StatusIdle,
 		Mode:          ModeBuild,
 		MaxIterations: 0,
+		ScriptPath:    "./loop.sh",
 		CurrentView:   "dashboard",
 	}
 }
@@ -100,6 +102,20 @@ func (s *State) GetWorkDesc() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.WorkDesc
+}
+
+// SetScriptPath updates the script path.
+func (s *State) SetScriptPath(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ScriptPath = path
+}
+
+// GetScriptPath returns the script path.
+func (s *State) GetScriptPath() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ScriptPath
 }
 
 // IncrementIteration increments the current iteration count.

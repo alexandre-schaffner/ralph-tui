@@ -1,5 +1,5 @@
 ---
-status: phase-1-complete
+status: phase-2-hardened
 phase: 2
 updated: 2026-01-20
 ---
@@ -43,21 +43,36 @@ Create a TUI that starts/stops `loop.sh` with <500ms response, streams stdout/st
   - Added keyboard controls: s=start, x=stop, 1-4=tabs, q=quit
   - Terminal size check (min 80x24)
 
-## Medium Priority: UI Views & Features (Phase 2)
-- [ ] **2.1 Implement Logs View (`src/tui/views/logs`)**
+## ✓ Completed: UI Views & Features (Phase 2)
+- [x] **2.1 Implement Logs View (`src/tui/views/logs`)**
   - Render content from Ring Buffer
   - Auto-scroll to bottom logic
-- [ ] **2.2 Connect Controls & Feedback**
-  - Bind 's' key to Start, 'q' to Stop/Quit
+- [x] **2.2 Connect Controls & Feedback**
+  - Bind 's' key to Start, 'x' to Stop, 'q' to Quit
   - Update State.Status based on Process Manager events
   - Render "Running", "Stopped", "Stopping" indicators
-- [ ] **2.3 Implement Dashboard View (`src/tui/views/dashboard`)**
-  - Parse streaming output for "Iteration: X" patterns
+- [x] **2.3 Implement Dashboard View (`src/tui/views/dashboard`)**
+  - Parse streaming output for "LOOP X" patterns
   - Update and display Iteration Count in State
-- [ ] **2.4 Implement Plan & Specs Views**
-  - `src/tui/views/plan`: Read/Render `IMPLEMENTATION_PLAN.md`
-  - `src/tui/views/specs`: Read/Render `specs/prd-ralph-tui.md`
+- [x] **2.4 Implement Plan & Specs Views**
+  - `src/tui/views/plan`: Read/Render `IMPLEMENTATION_PLAN.md` with caching
+  - `src/tui/views/specs`: Read/Render spec files with caching
   - Add Tab navigation (Dashboard | Logs | Plan | Specs)
+
+## ✓ Completed: Hardening & Critical Fixes (Phase 2.5)
+- [x] **2.5 Process Manager Hardening**
+  - Fixed deadlock in Stop(): Release lock before waiting on doneChan
+  - Fixed onComplete callback race: Copy under lock before calling
+  - Implemented process group handling: Set Setpgid and kill entire process group
+  - Fixed parseLogsForIterations never called: Now batched with tickForLogs
+  - Fixed channel reinit without cleanup: Close old channels properly
+  - Added comprehensive manager tests: lifecycle, stop non-running, prevent multiple starts, restart after stop
+- [x] **2.6 Configuration & Usability**
+  - Made loop.sh path configurable via --script flag (default: ./loop.sh)
+  - Added validation for --max (must be non-negative)
+  - Implemented file I/O caching for plan/specs views (5s cache duration)
+  - Removed unused stopChan field
+  - Extracted buffer size constant (DefaultBufferSize = 1000)
 
 ## Low Priority: Polish & Production (Phase 3)
 - [ ] **3.1 Configuration & CLI**

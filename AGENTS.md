@@ -6,10 +6,12 @@
 - **Concurrency**: `loop.sh` runs in a subprocess; stdout/stderr are streamed to a ring buffer via goroutines.
 
 ## Key Gotchas
-- **Process Control**: Killing the TUI must ensure the child process (`loop.sh`) is also terminated (SIGTERM → 5s → SIGKILL).
+- **Process Control**: Uses process groups (Setpgid=true) to terminate `loop.sh` and all child processes (SIGTERM to -pgid → 5s → SIGKILL to -pgid).
 - **Streaming**: Large output from `loop.sh` uses a 1000-line ring buffer to prevent UI lag.
+- **Thread Safety**: Process Manager uses mutex to prevent deadlocks (doneChan captured under lock, then released before waiting).
+- **File Caching**: Plan/Specs views cache file content for 5 seconds to avoid I/O in render loop.
 
 ## Run Commands
 - **Build**: `go build -o ralph-tui ./cmd/ralph-tui`
-- **Run**: `./ralph-tui [--mode build|plan|plan-work] [--max N] [--work "desc"]`
-- **Test**: `go test ./...`
+- **Run**: `./ralph-tui [--mode build|plan|plan-work] [--max N] [--work "desc"] [--script path/to/loop.sh]`
+- **Test**: `go test ./...` (comprehensive tests for manager lifecycle, ring buffer, state)

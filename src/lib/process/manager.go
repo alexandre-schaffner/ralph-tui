@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+const (
+	// DefaultBufferSize is the default ring buffer size for logs.
+	DefaultBufferSize = 1000
+)
+
 // Status represents the current state of the managed process.
 type Status int
 
@@ -40,7 +45,6 @@ type Manager struct {
 	cmd        *exec.Cmd
 	status     Status
 	logs       *RingBuffer
-	stopChan   chan struct{}
 	doneChan   chan error
 	mu         sync.RWMutex
 	onComplete func() // Callback when process completes naturally
@@ -50,7 +54,6 @@ type Manager struct {
 func NewManager(bufferSize int) *Manager {
 	return &Manager{
 		logs:     NewRingBuffer(bufferSize),
-		stopChan: make(chan struct{}),
 		doneChan: make(chan error, 1),
 		status:   StatusIdle,
 	}
@@ -67,10 +70,22 @@ func (m *Manager) Start(command string, args ...string) error {
 		return fmt.Errorf("process already running")
 	}
 
+	// Close old doneChan if it exists to prevent leaks
+	if m.doneChan != nil {
+		select {
+		case <-m.doneChan:
+			// Already drained
+		default:
+			// Not drained, but we're starting fresh
+		}
+	}
+
 	// Parse command into trusted state
 	m.cmd = exec.Command(command, args...)
+	m.cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true, // Create process group for clean child termination
+	}
 	m.status = StatusRunning
-	m.stopChan = make(chan struct{})
 	m.doneChan = make(chan error, 1)
 
 	// Capture stdout and stderr
@@ -111,13 +126,15 @@ func (m *Manager) Start(command string, args ...string) error {
 
 		m.mu.Lock()
 		m.status = StatusStopped
+		// Copy callback under lock to prevent race
+		callback := m.onComplete
 		m.mu.Unlock()
 
 		m.doneChan <- err
 
 		// Trigger completion callback if registered
-		if m.onComplete != nil {
-			m.onComplete()
+		if callback != nil {
+			callback()
 		}
 	}()
 
@@ -152,21 +169,29 @@ func (m *Manager) Stop() error {
 
 	m.status = StatusStopping
 	process := m.cmd.Process
+	doneChan := m.doneChan
 	m.mu.Unlock()
 
-	// Send SIGTERM for graceful shutdown
-	if err := process.Signal(syscall.SIGTERM); err != nil {
-		return fmt.Errorf("failed to send SIGTERM: %w", err)
+	// Send SIGTERM to process group for graceful shutdown
+	pgid := process.Pid
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		// Fallback to single process if process group kill fails
+		if err := process.Signal(syscall.SIGTERM); err != nil {
+			return fmt.Errorf("failed to send SIGTERM: %w", err)
+		}
 	}
 
 	// Wait for graceful shutdown with timeout
 	select {
-	case <-m.doneChan:
+	case <-doneChan:
 		return nil
 	case <-time.After(5 * time.Second):
-		// Timeout - force kill
-		if err := process.Kill(); err != nil {
-			return fmt.Errorf("failed to kill process: %w", err)
+		// Timeout - force kill process group
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			// Fallback to single process kill
+			if err := process.Kill(); err != nil {
+				return fmt.Errorf("failed to kill process: %w", err)
+			}
 		}
 		return fmt.Errorf("process killed after timeout")
 	}
