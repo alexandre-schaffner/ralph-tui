@@ -22,23 +22,34 @@ type fileCache struct {
 
 // Model is the root Bubbletea model.
 type Model struct {
-	state         *state.State
-	manager       *process.Manager
-	width         int
-	height        int
-	ready         bool
-	planCache     *fileCache
-	specsCache    map[string]*fileCache
-	cacheDuration time.Duration
+	state             *state.State
+	manager           *process.Manager
+	width             int
+	height            int
+	ready             bool
+	planCache         *fileCache
+	specsCache        map[string]*fileCache
+	cacheDuration     time.Duration
+	showQuitConfirm   bool
+	selectedSpecIndex int
+	specsListCache    []string
+	specsViewingFile  bool
+	planScrollOffset  int
+	specsScrollOffset int
 }
 
 // NewModel creates a new TUI model.
 func NewModel(st *state.State, mgr *process.Manager) *Model {
 	return &Model{
-		state:         st,
-		manager:       mgr,
-		specsCache:    make(map[string]*fileCache),
-		cacheDuration: 5 * time.Second, // Refresh cache every 5 seconds
+		state:             st,
+		manager:           mgr,
+		specsCache:        make(map[string]*fileCache),
+		cacheDuration:     5 * time.Second, // Refresh cache every 5 seconds
+		showQuitConfirm:   false,
+		selectedSpecIndex: 0,
+		specsViewingFile:  false,
+		planScrollOffset:  0,
+		specsScrollOffset: 0,
 	}
 }
 
@@ -89,6 +100,90 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKeyPress processes keyboard input.
 func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle quit confirmation dialog
+	if m.showQuitConfirm {
+		switch msg.String() {
+		case "y", "Y":
+			return m, m.confirmQuit()
+		case "n", "N", "q", "ctrl+c":
+			m.showQuitConfirm = false
+			return m, nil
+		}
+		return m, nil
+	}
+
+	// Handle specs view navigation
+	if m.state.GetCurrentView() == "specs" {
+		if m.specsViewingFile {
+			switch msg.String() {
+			case "esc", "backspace":
+				m.specsViewingFile = false
+				m.specsScrollOffset = 0
+				return m, nil
+			case "up", "k":
+				if m.specsScrollOffset > 0 {
+					m.specsScrollOffset--
+				}
+				return m, nil
+			case "down", "j":
+				m.specsScrollOffset++
+				return m, nil
+			case "pgup":
+				m.specsScrollOffset -= 10
+				if m.specsScrollOffset < 0 {
+					m.specsScrollOffset = 0
+				}
+				return m, nil
+			case "pgdown":
+				m.specsScrollOffset += 10
+				return m, nil
+			}
+		} else {
+			switch msg.String() {
+			case "up", "k":
+				if m.selectedSpecIndex > 0 {
+					m.selectedSpecIndex--
+				}
+				return m, nil
+			case "down", "j":
+				if len(m.specsListCache) > 0 && m.selectedSpecIndex < len(m.specsListCache)-1 {
+					m.selectedSpecIndex++
+				}
+				return m, nil
+			case "enter":
+				if len(m.specsListCache) > 0 {
+					m.specsViewingFile = true
+					m.specsScrollOffset = 0
+				}
+				return m, nil
+			}
+		}
+	}
+
+	// Handle plan view scrolling
+	if m.state.GetCurrentView() == "plan" {
+		switch msg.String() {
+		case "up", "k":
+			if m.planScrollOffset > 0 {
+				m.planScrollOffset--
+			}
+			return m, nil
+		case "down", "j":
+			m.planScrollOffset++
+			return m, nil
+		case "pgup":
+			m.planScrollOffset -= 10
+			if m.planScrollOffset < 0 {
+				m.planScrollOffset = 0
+			}
+			return m, nil
+		case "pgdown":
+			m.planScrollOffset += 10
+			return m, nil
+		}
+	}
+
+	// Global key handlers
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, m.handleQuit()
@@ -99,31 +194,45 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "x":
 		return m, m.handleStop()
 
+	case "X":
+		return m, m.handleStopImmediate()
+
+	case "p":
+		return m, m.handlePause()
+
 	case "1":
 		m.state.SetCurrentView("dashboard")
+		m.specsViewingFile = false
 		return m, nil
 
 	case "2":
 		m.state.SetCurrentView("logs")
+		m.specsViewingFile = false
 		return m, nil
 
 	case "3":
 		m.state.SetCurrentView("plan")
 		// Invalidate cache on view switch for fresh content
 		m.planCache = nil
+		m.planScrollOffset = 0
+		m.specsViewingFile = false
 		return m, nil
 
 	case "4":
 		m.state.SetCurrentView("specs")
 		// Invalidate cache on view switch for fresh content
 		m.specsCache = make(map[string]*fileCache)
+		m.specsListCache = nil
+		m.selectedSpecIndex = 0
+		m.specsScrollOffset = 0
+		m.specsViewingFile = false
 		return m, nil
 	}
 
 	return m, nil
 }
 
-// handleStart starts the loop process.
+// handleStart starts or resumes the loop process.
 func (m *Model) handleStart() tea.Cmd {
 	if m.manager.IsRunning() {
 		return nil
@@ -151,10 +260,14 @@ func (m *Model) handleStart() tea.Cmd {
 		}
 	}
 
-	m.state.ResetIteration()
+	// Only reset iteration if not resuming from pause
+	if !m.manager.IsPaused() {
+		m.state.ResetIteration()
+		m.manager.ClearLogs()
+	}
+
 	m.state.ClearError()
 	m.state.SetComplete(false)
-	m.manager.ClearLogs()
 
 	scriptPath := m.state.GetScriptPath()
 	err := m.manager.Start(scriptPath, args...)
@@ -182,12 +295,56 @@ func (m *Model) handleStop() tea.Cmd {
 	return nil
 }
 
-// handleQuit handles application exit.
+// handleQuit handles application exit with confirmation if process running.
 func (m *Model) handleQuit() tea.Cmd {
+	// If process is running, show confirmation
+	if m.manager.IsRunning() {
+		m.showQuitConfirm = true
+		return nil
+	}
+	return tea.Quit
+}
+
+// confirmQuit performs the actual quit after confirmation.
+func (m *Model) confirmQuit() tea.Cmd {
 	if m.manager.IsRunning() {
 		_ = m.manager.Stop()
 	}
 	return tea.Quit
+}
+
+// handleStopImmediate sends SIGINT to the process for immediate stop.
+func (m *Model) handleStopImmediate() tea.Cmd {
+	if !m.manager.IsRunning() {
+		return nil
+	}
+
+	err := m.manager.StopImmediate()
+	if err != nil {
+		m.state.SetError(err.Error())
+	} else {
+		m.state.SetError("Process interrupted (SIGINT)")
+	}
+	m.state.SetProcessStatus(process.StatusStopped)
+
+	return nil
+}
+
+// handlePause pauses the loop process.
+func (m *Model) handlePause() tea.Cmd {
+	if !m.manager.IsRunning() {
+		return nil
+	}
+
+	err := m.manager.Pause()
+	if err != nil {
+		m.state.SetError(err.Error())
+	} else {
+		m.state.SetError("Process paused - press 's' to resume")
+	}
+	m.state.SetProcessStatus(process.StatusPaused)
+
+	return nil
 }
 
 // View renders the UI.
@@ -294,16 +451,30 @@ func (m *Model) renderDashboard(height int) string {
 	lines = append(lines, lipgloss.NewStyle().Bold(true).Render("Status Dashboard"))
 	lines = append(lines, "")
 
-	// Process status
-	status := m.manager.GetStatus().String()
-	lines = append(lines, fmt.Sprintf("Process Status: %s", status))
+	// Process status with color
+	status := m.manager.GetStatus()
+	statusStr := status.String()
+	statusStyle := lipgloss.NewStyle()
+
+	switch status {
+	case process.StatusRunning:
+		statusStyle = statusStyle.Foreground(lipgloss.Color("10"))
+	case process.StatusStopping:
+		statusStyle = statusStyle.Foreground(lipgloss.Color("11"))
+	case process.StatusPaused:
+		statusStyle = statusStyle.Foreground(lipgloss.Color("12"))
+	case process.StatusStopped:
+		statusStyle = statusStyle.Foreground(lipgloss.Color("9"))
+	}
+
+	lines = append(lines, fmt.Sprintf("Process Status: %s", statusStyle.Render(statusStr)))
 
 	// Mode
 	mode := m.state.GetMode()
 	lines = append(lines, fmt.Sprintf("Mode: %s", mode))
 
 	// Iteration count
-	if m.manager.IsRunning() {
+	if m.manager.IsRunning() || m.manager.IsPaused() {
 		iter := m.state.GetCurrentIteration()
 		maxIter := m.state.GetMaxIterations()
 		if maxIter > 0 {
@@ -330,12 +501,18 @@ func (m *Model) renderDashboard(height int) string {
 			Render("✓ Loop completed successfully!"))
 	}
 
-	// Error message
+	// Error message (used for pause notification and errors)
 	if errMsg := m.state.GetError(); errMsg != "" {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().
-			Foreground(lipgloss.Color("9")).
-			Render(fmt.Sprintf("Error: %s", errMsg)))
+		if strings.Contains(errMsg, "paused") {
+			lines = append(lines, lipgloss.NewStyle().
+				Foreground(lipgloss.Color("12")).
+				Render(errMsg))
+		} else {
+			lines = append(lines, lipgloss.NewStyle().
+				Foreground(lipgloss.Color("9")).
+				Render(errMsg))
+		}
 	}
 
 	return strings.Join(lines, "\n")
@@ -358,42 +535,58 @@ func (m *Model) renderLogs(height int) string {
 	return strings.Join(logs[start:], "\n")
 }
 
-// renderPlan renders the plan view with caching.
+// renderPlan renders the plan view with scrolling support.
 func (m *Model) renderPlan(height int) string {
 	// Check cache validity
 	now := time.Now()
+	var content string
+
 	if m.planCache != nil && now.Sub(m.planCache.timestamp) < m.cacheDuration {
 		// Use cached content
-		lines := strings.Split(m.planCache.content, "\n")
-		if len(lines) > height {
-			lines = lines[:height]
+		content = m.planCache.content
+	} else {
+		// Cache miss or expired - read from disk
+		data, err := os.ReadFile("IMPLEMENTATION_PLAN.md")
+		if err != nil {
+			return "No implementation plan found.\n\nRun './loop.sh plan' to create one."
 		}
-		return strings.Join(lines, "\n")
+
+		content = string(data)
+
+		// Update cache
+		m.planCache = &fileCache{
+			content:   content,
+			timestamp: now,
+		}
 	}
 
-	// Cache miss or expired - read from disk
-	data, err := os.ReadFile("IMPLEMENTATION_PLAN.md")
-	if err != nil {
-		return "No implementation plan found.\n\nRun './loop.sh plan' to create one."
-	}
-
-	content := string(data)
-
-	// Update cache
-	m.planCache = &fileCache{
-		content:   content,
-		timestamp: now,
-	}
+	var headerLines []string
+	headerLines = append(headerLines, lipgloss.NewStyle().Bold(true).Render("Implementation Plan"))
+	headerLines = append(headerLines, lipgloss.NewStyle().Faint(true).Render("(↑↓:scroll, pgup/pgdn:fast scroll)"))
+	headerLines = append(headerLines, "")
 
 	lines := strings.Split(content, "\n")
-	if len(lines) > height {
-		lines = lines[:height]
+
+	// Apply scroll offset
+	start := m.planScrollOffset
+	if start >= len(lines) {
+		start = len(lines) - 1
+	}
+	if start < 0 {
+		start = 0
 	}
 
-	return strings.Join(lines, "\n")
+	remaining := height - len(headerLines)
+	end := start + remaining
+	if end > len(lines) {
+		end = len(lines)
+	}
+
+	result := append(headerLines, lines[start:end]...)
+	return strings.Join(result, "\n")
 }
 
-// renderSpecs renders the specs view with caching.
+// renderSpecs renders the specs view with selectable file list.
 func (m *Model) renderSpecs(height int) string {
 	entries, err := os.ReadDir("specs")
 	if err != nil {
@@ -411,47 +604,72 @@ func (m *Model) renderSpecs(height int) string {
 		return "No spec files found in specs/"
 	}
 
-	// For MVP, just list the files
-	var lines []string
-	lines = append(lines, lipgloss.NewStyle().Bold(true).Render("Specification Files"))
-	lines = append(lines, "")
-	for _, file := range mdFiles {
-		lines = append(lines, fmt.Sprintf("  - %s", file))
-	}
+	// Update cache
+	m.specsListCache = mdFiles
 
-	// Show first spec content if available with caching
-	if len(mdFiles) > 0 {
-		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("Preview: %s", mdFiles[0])))
-		lines = append(lines, "")
-
-		firstFile := mdFiles[0]
+	// If viewing a file, show its content
+	if m.specsViewingFile && m.selectedSpecIndex < len(mdFiles) {
+		selectedFile := mdFiles[m.selectedSpecIndex]
 		now := time.Now()
 		var content string
 
 		// Check cache validity
-		if cache, exists := m.specsCache[firstFile]; exists && now.Sub(cache.timestamp) < m.cacheDuration {
+		if cache, exists := m.specsCache[selectedFile]; exists && now.Sub(cache.timestamp) < m.cacheDuration {
 			content = cache.content
 		} else {
 			// Cache miss or expired - read from disk
-			data, err := os.ReadFile(fmt.Sprintf("specs/%s", firstFile))
+			data, err := os.ReadFile(fmt.Sprintf("specs/%s", selectedFile))
 			if err == nil {
 				content = string(data)
 				// Update cache
-				m.specsCache[firstFile] = &fileCache{
+				m.specsCache[selectedFile] = &fileCache{
 					content:   content,
 					timestamp: now,
 				}
 			}
 		}
 
+		var lines []string
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("Viewing: %s", selectedFile)))
+		lines = append(lines, lipgloss.NewStyle().Faint(true).Render("(esc:back, ↑↓:scroll, pgup/pgdn:fast scroll)"))
+		lines = append(lines, "")
+
 		if content != "" {
-			preview := strings.Split(content, "\n")
-			remaining := height - len(lines) - 1
-			if len(preview) > remaining && remaining > 0 {
-				preview = preview[:remaining]
+			contentLines := strings.Split(content, "\n")
+			// Apply scroll offset
+			start := m.specsScrollOffset
+			if start >= len(contentLines) {
+				start = len(contentLines) - 1
 			}
-			lines = append(lines, preview...)
+			if start < 0 {
+				start = 0
+			}
+
+			remaining := height - 3
+			end := start + remaining
+			if end > len(contentLines) {
+				end = len(contentLines)
+			}
+
+			lines = append(lines, contentLines[start:end]...)
+		}
+
+		return strings.Join(lines, "\n")
+	}
+
+	// Show file list with selection
+	var lines []string
+	lines = append(lines, lipgloss.NewStyle().Bold(true).Render("Specification Files"))
+	lines = append(lines, lipgloss.NewStyle().Faint(true).Render("(↑↓:select, enter:view)"))
+	lines = append(lines, "")
+
+	for i, file := range mdFiles {
+		if i == m.selectedSpecIndex {
+			lines = append(lines, lipgloss.NewStyle().
+				Foreground(lipgloss.Color("12")).
+				Render(fmt.Sprintf("  > %s", file)))
+		} else {
+			lines = append(lines, fmt.Sprintf("    %s", file))
 		}
 	}
 
@@ -460,10 +678,19 @@ func (m *Model) renderSpecs(height int) string {
 
 // renderFooter renders the footer with keybindings.
 func (m *Model) renderFooter() string {
+	// Show quit confirmation if active
+	if m.showQuitConfirm {
+		return lipgloss.NewStyle().
+			Foreground(lipgloss.Color("11")).
+			Render("Process is running. Quit anyway? (y/n)")
+	}
+
 	var keys []string
 
 	if m.manager.IsRunning() {
-		keys = append(keys, "x:stop")
+		keys = append(keys, "x:stop(graceful)", "X:stop(immediate)", "p:pause")
+	} else if m.manager.IsPaused() {
+		keys = append(keys, "s:resume")
 	} else {
 		keys = append(keys, "s:start")
 	}
@@ -483,7 +710,18 @@ func (m *Model) fetchGitBranch() tea.Cmd {
 		if err != nil {
 			return gitBranchMsg("unknown")
 		}
-		return gitBranchMsg(strings.TrimSpace(string(output)))
+		branch := strings.TrimSpace(string(output))
+		// Handle detached HEAD state
+		if branch == "" {
+			// Try to get the commit hash
+			cmd = exec.Command("git", "rev-parse", "--short", "HEAD")
+			output, err = cmd.Output()
+			if err != nil {
+				return gitBranchMsg("detached HEAD")
+			}
+			branch = "detached@" + strings.TrimSpace(string(output))
+		}
+		return gitBranchMsg(branch)
 	}
 }
 

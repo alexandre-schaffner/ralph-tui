@@ -23,6 +23,7 @@ const (
 	StatusRunning
 	StatusStopping
 	StatusStopped
+	StatusPaused
 )
 
 func (s Status) String() string {
@@ -35,6 +36,8 @@ func (s Status) String() string {
 		return "Stopping"
 	case StatusStopped:
 		return "Stopped"
+	case StatusPaused:
+		return "Paused"
 	default:
 		return "Unknown"
 	}
@@ -64,10 +67,10 @@ func NewManager(bufferSize int) *Manager {
 func (m *Manager) Start(command string, args ...string) error {
 	m.mu.Lock()
 
-	// Guard: Cannot start if already running
-	if m.status == StatusRunning {
+	// Guard: Cannot start if already running or stopping
+	if m.status == StatusRunning || m.status == StatusStopping {
 		m.mu.Unlock()
-		return fmt.Errorf("process already running")
+		return fmt.Errorf("process already running or stopping")
 	}
 
 	// Close old doneChan if it exists to prevent leaks
@@ -156,8 +159,8 @@ func (m *Manager) streamOutput(wg *sync.WaitGroup, r io.Reader, prefix string) {
 func (m *Manager) Stop() error {
 	m.mu.Lock()
 
-	// Guard: Cannot stop if not running
-	if m.status != StatusRunning {
+	// Guard: Cannot stop if not running or already stopping
+	if m.status != StatusRunning && m.status != StatusStopping {
 		m.mu.Unlock()
 		return fmt.Errorf("process not running")
 	}
@@ -175,8 +178,15 @@ func (m *Manager) Stop() error {
 	// Send SIGTERM to process group for graceful shutdown
 	pgid := process.Pid
 	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		// Handle ESRCH (no such process) gracefully
+		if err == syscall.ESRCH {
+			return nil
+		}
 		// Fallback to single process if process group kill fails
 		if err := process.Signal(syscall.SIGTERM); err != nil {
+			if err == syscall.ESRCH {
+				return nil
+			}
 			return fmt.Errorf("failed to send SIGTERM: %w", err)
 		}
 	}
@@ -188,11 +198,137 @@ func (m *Manager) Stop() error {
 	case <-time.After(5 * time.Second):
 		// Timeout - force kill process group
 		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-			// Fallback to single process kill
-			if err := process.Kill(); err != nil {
-				return fmt.Errorf("failed to kill process: %w", err)
+			// Handle ESRCH gracefully
+			if err != syscall.ESRCH {
+				// Fallback to single process kill
+				if err := process.Kill(); err != nil && err != syscall.ESRCH {
+					return fmt.Errorf("failed to kill process: %w", err)
+				}
 			}
 		}
+		return fmt.Errorf("process killed after timeout")
+	}
+}
+
+// StopImmediate sends SIGINT to the process for immediate interruption (<2s).
+func (m *Manager) StopImmediate() error {
+	m.mu.Lock()
+
+	// Guard: Cannot stop if not running or already stopping
+	if m.status != StatusRunning && m.status != StatusStopping {
+		m.mu.Unlock()
+		return fmt.Errorf("process not running")
+	}
+
+	if m.cmd == nil || m.cmd.Process == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("no process to stop")
+	}
+
+	m.status = StatusStopping
+	process := m.cmd.Process
+	doneChan := m.doneChan
+	m.mu.Unlock()
+
+	// Send SIGINT to process group for immediate stop
+	pgid := process.Pid
+	if err := syscall.Kill(-pgid, syscall.SIGINT); err != nil {
+		// Handle ESRCH (no such process) gracefully
+		if err == syscall.ESRCH {
+			return nil
+		}
+		// Fallback to single process if process group kill fails
+		if err := process.Signal(syscall.SIGINT); err != nil {
+			if err == syscall.ESRCH {
+				return nil
+			}
+			return fmt.Errorf("failed to send SIGINT: %w", err)
+		}
+	}
+
+	// Wait for immediate stop with 2 second timeout
+	select {
+	case <-doneChan:
+		return nil
+	case <-time.After(2 * time.Second):
+		// Timeout - force kill process group
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			// Handle ESRCH gracefully
+			if err != syscall.ESRCH {
+				// Fallback to single process kill
+				if err := process.Kill(); err != nil && err != syscall.ESRCH {
+					return fmt.Errorf("failed to kill process: %w", err)
+				}
+			}
+		}
+		return fmt.Errorf("process killed after timeout")
+	}
+}
+
+// Pause stops the process gracefully and transitions to paused state.
+// This allows manual restart later.
+func (m *Manager) Pause() error {
+	m.mu.Lock()
+
+	// Guard: Cannot pause if not running
+	if m.status != StatusRunning {
+		m.mu.Unlock()
+		return fmt.Errorf("process not running")
+	}
+
+	if m.cmd == nil || m.cmd.Process == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("no process to pause")
+	}
+
+	m.status = StatusStopping
+	process := m.cmd.Process
+	doneChan := m.doneChan
+	m.mu.Unlock()
+
+	// Send SIGTERM to process group for graceful shutdown
+	pgid := process.Pid
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		// Handle ESRCH (no such process) gracefully
+		if err == syscall.ESRCH {
+			m.mu.Lock()
+			m.status = StatusPaused
+			m.mu.Unlock()
+			return nil
+		}
+		// Fallback to single process if process group kill fails
+		if err := process.Signal(syscall.SIGTERM); err != nil {
+			if err == syscall.ESRCH {
+				m.mu.Lock()
+				m.status = StatusPaused
+				m.mu.Unlock()
+				return nil
+			}
+			return fmt.Errorf("failed to send SIGTERM: %w", err)
+		}
+	}
+
+	// Wait for graceful shutdown with timeout
+	select {
+	case <-doneChan:
+		m.mu.Lock()
+		m.status = StatusPaused
+		m.mu.Unlock()
+		return nil
+	case <-time.After(5 * time.Second):
+		// Timeout - force kill process group
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			// Handle ESRCH gracefully
+			if err != syscall.ESRCH {
+				// Fallback to single process kill
+				if err := process.Kill(); err != nil && err != syscall.ESRCH {
+					return fmt.Errorf("failed to kill process: %w", err)
+				}
+			}
+		}
+		m.mu.Lock()
+		m.status = StatusPaused
+		m.mu.Unlock()
 		return fmt.Errorf("process killed after timeout")
 	}
 }
@@ -202,6 +338,13 @@ func (m *Manager) IsRunning() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.status == StatusRunning
+}
+
+// IsPaused returns true if the process is paused.
+func (m *Manager) IsPaused() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.status == StatusPaused
 }
 
 // GetStatus returns the current status of the process.

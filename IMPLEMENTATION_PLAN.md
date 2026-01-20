@@ -1,6 +1,6 @@
 ---
-status: phase-2-hardened
-phase: 2
+status: phase-3-complete
+phase: 3
 updated: 2026-01-20
 ---
 
@@ -16,6 +16,8 @@ Create a TUI that starts/stops `loop.sh` with <500ms response, streams stdout/st
 | Bubbletea/Lipgloss | Standard Go TUI stack for robust event loops. | `specs/prd-ralph-tui.md` |
 | Centralized State | Single source of truth (Redux-like) for UI consistency. | `AGENTS.md` |
 | Ring Buffer | Prevent UI lag/crashes from massive log volume. | `reviewer-feedback` |
+| Pause as Stop+Resume | Cannot truly pause bash script; graceful stop allows review between iterations. | `specs/prd-ralph-tui.md` |
+| SIGINT for Immediate | SIGINT provides <2s interruption vs SIGTERM's graceful 5s timeout. | `specs/prd-ralph-tui.md` US-004 |
 
 ## ✓ Completed: Core Infrastructure & Safety (Phase 1)
 - [x] **1.1 Initialize Project Structure**
@@ -74,13 +76,46 @@ Create a TUI that starts/stops `loop.sh` with <500ms response, streams stdout/st
   - Removed unused stopChan field
   - Extracted buffer size constant (DefaultBufferSize = 1000)
 
-## Low Priority: Polish & Production (Phase 3)
-- [ ] **3.1 Configuration & CLI**
-  - Parse flags: `--loop-script`, `--log-level`
-  - Support `RALPH_TUI_PORT` env var (if needed for remote)
-- [ ] **3.2 Visual Styling (Lipgloss)**
-  - Apply borders, padding, and colors to Views
-  - Style status indicators (Green=Running, Red=Stopped)
-- [ ] **3.3 Graceful Shutdown**
-  - Trap SIGINT/SIGTERM in `main.go`
-  - Ensure child process is killed before TUI exits
+## ✓ Completed: Advanced Features & Polish (Phase 3)
+- [x] **3.1 Immediate Stop (US-004)**
+  - Added `StopImmediate()`: Sends SIGINT to process group for <2s interruption
+  - Added 'X' keybinding for immediate stop vs 'x' graceful stop
+  - ESRCH handling: Gracefully handle "no such process" errors
+  - Guard in Start(): Prevent starting during StatusStopping
+- [x] **3.2 Pause/Resume (US-005)**
+  - Added `Pause()`: Graceful stop that transitions to StatusPaused
+  - Added 'p' keybinding to pause running process
+  - Resume via 's' key preserves iteration count and logs
+  - Footer shows "s:resume" when paused
+- [x] **3.3 Quit Confirmation (US-010)**
+  - Show confirmation prompt when quitting with running process
+  - Footer displays "Process is running. Quit anyway? (y/n)"
+  - 'y' confirms and stops process before exit
+  - 'n' cancels and returns to TUI
+- [x] **3.4 Specs Browser Selection (US-008)**
+  - Selectable file list with ↑↓ navigation and enter to view
+  - Full-screen file viewer with scrolling support
+  - Esc/backspace to return to file list
+  - Highlight selected file in list
+- [x] **3.5 Plan/Specs Scrolling (US-007, US-008)**
+  - Added scroll offsets for plan and specs views
+  - ↑↓ keys scroll line-by-line
+  - PgUp/PgDn scroll 10 lines at a time
+  - Header shows scroll hints
+- [x] **3.6 Process Safety & Edge Cases**
+  - Guard Start() against StatusStopping state
+  - Handle ESRCH errors in Stop/StopImmediate/Pause
+  - Safe process group termination with fallback
+  - Detached HEAD handling: Show "detached@<hash>" instead of empty
+- [x] **3.7 UI Enhancements**
+  - Color-coded status indicators (green=running, yellow=stopping, blue=paused, red=stopped)
+  - Dynamic footer showing context-appropriate keybindings
+  - Pause notification uses info color vs error red
+  - Dashboard shows iteration count for paused processes
+
+## Future Enhancements (Phase 4 - Not Planned)
+- [ ] Log filtering/search within TUI
+- [ ] Configuration file support (~/.ralph-tui.toml)
+- [ ] Multiple script profiles (save mode/max iterations presets)
+- [ ] Export logs to file from TUI
+- [ ] Real-time syntax highlighting for logs
